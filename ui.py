@@ -2,8 +2,9 @@
 Launcher page, in the same editorial style as motion-chimes: white page,
 centred wordmark, small uppercase type, thin rules. Pick the input, style,
 beat source and where the visualizer opens, check the live preview and the
-level meters, then press Play. It stays open as a control panel while the
-visualizer plays, so styles can be switched mid-set.
+level meters, then press Play. Styles are checkboxes, so they can be stacked.
+It stays open as a control panel while the visualizer plays, so styles can be
+switched mid-set.
 """
 
 import cv2
@@ -24,6 +25,8 @@ VIEW_Y = 104
 NAV_BASELINE = 58
 MAX_DEVICES = 8
 ROW = 20
+BOX = 11       # checkbox size
+BOX_GAP = 20   # checkbox to label
 
 # Colours are BGR (OpenCV order); the greys are the same either way.
 INK = (17, 17, 17)
@@ -79,15 +82,19 @@ def shorten(text, font, width):
 
 
 class Link:
-    """A clickable word, underlined when selected or hovered."""
+    """A clickable word, underlined when selected or hovered. A checkbox link
+    has its box in front of the word and is shown ticked instead."""
 
-    def __init__(self, text, action, value, x, baseline, font):
-        self.action, self.value, self.x, self.baseline, self.font = action, value, x, baseline, font
-        self.text = shorten(text, font, SIDE_W)
+    def __init__(self, text, action, value, x, baseline, font, checkbox=False):
+        self.action, self.value, self.baseline, self.font = action, value, baseline, font
+        self.checkbox = checkbox
+        self.box_x = x
+        self.x = x + BOX_GAP if checkbox else x
+        self.text = shorten(text, font, SIDE_W - (self.x - x))
         self.width = int(font.getlength(self.text))
 
     def hit(self, x, y):
-        return (self.x - 6 <= x <= self.x + max(self.width, 40) + 6
+        return (self.box_x - 6 <= x <= self.x + max(self.width, 40) + 6
                 and self.baseline - self.font.size - 4 <= y <= self.baseline + 5)
 
 
@@ -100,7 +107,7 @@ class Launcher:
             "body": load_font("regular", 13),
             "play": load_font("bold", 15),
         }
-        self.settings = settings   # dict: device, style, link, fullscreen
+        self.settings = settings   # dict: device, styles, link, fullscreen
         self.devices = []
         self.links = []
         self.mouse = (-1, -1)
@@ -119,12 +126,12 @@ class Launcher:
         y = VIEW_Y + 10
         self.heads = []
 
-        def section(title, rows):
+        def section(title, rows, checkbox=False, hint=""):
             nonlocal y
-            self.heads.append((title, y))
+            self.heads.append((title, y, hint))
             y += 28
             for text, action, value in rows:
-                self.links.append(Link(text, action, value, MARGIN, y, body))
+                self.links.append(Link(text, action, value, MARGIN, y, body, checkbox))
                 y += ROW
             y += 30
 
@@ -133,7 +140,7 @@ class Launcher:
             rows = [("No inputs found", "none", None)]
         rows.append(("Refresh list", "refresh", None))
         section("INPUT", rows)
-        section("STYLE", [(s, "style", s) for s in STYLES])
+        section("STYLE", [(s, "style", s) for s in STYLES], checkbox=True, hint="Tick to stack")
         section("BEAT", [("Kick drum", "link", False), ("Ableton Link", "link", True)])
         section("OPEN IN", [("Window", "fullscreen", False), ("Full screen", "fullscreen", True)])
 
@@ -159,7 +166,9 @@ class Launcher:
         s = self.settings
         if link.action == "device":
             return link.value == s["device"]
-        if link.action in ("style", "link", "fullscreen"):
+        if link.action == "style":
+            return link.value in s["styles"]
+        if link.action in ("link", "fullscreen"):
             return link.value == s[link.action]
         return False
 
@@ -195,8 +204,10 @@ class Launcher:
         self.text((W - MARGIN, NAV_BASELINE), beat.status(), "nav", anchor="rs")
 
     def draw_lists(self, canvas, audio, link_error):
-        for title, y in self.heads:
+        for title, y, hint in self.heads:
             self.text((MARGIN, y), title, "head")
+            if hint:
+                self.text((MARGIN + SIDE_W, y), hint, "body", GREY, anchor="rs")
         mx, my = self.mouse
         for link in self.links:
             colour = GREY if link.action in ("none", "refresh") else INK
@@ -204,12 +215,26 @@ class Launcher:
             if link.action == "link" and link.value and link_error:
                 text, colour = f"Ableton Link ({link_error})", GREY
             self.text((link.x, link.baseline), text, "body", colour)
-            if self.selected(link) or link.hit(mx, my) and link.action != "none":
+            if link.checkbox:
+                self.draw_box(canvas, link)
+                if link.hit(mx, my):
+                    self.underline(canvas, link.x, link.width, link.baseline, colour)
+            elif self.selected(link) or link.hit(mx, my) and link.action != "none":
                 self.underline(canvas, link.x, link.width, link.baseline, colour)
         if audio.error:
             last = max(l.baseline for l in self.links if l.action in ("refresh", "none"))
             self.text((MARGIN, last + 18), shorten(audio.error, self.fonts["body"], SIDE_W),
                       "body", LIVE)
+
+    def draw_box(self, canvas, link):
+        x0, y1 = link.box_x, link.baseline
+        y0 = y1 - BOX
+        if self.selected(link):
+            cv2.rectangle(canvas, (x0, y0), (x0 + BOX, y1), INK, -1)
+            tick = np.array([[x0 + 2, y0 + 6], [x0 + 4, y0 + 9], [x0 + 9, y0 + 2]], np.int32)
+            cv2.polylines(canvas, [tick], False, PAPER, 2, cv2.LINE_AA)
+        else:
+            cv2.rectangle(canvas, (x0, y0), (x0 + BOX, y1), INK, 1)
 
     def draw_preview(self, canvas, preview, playing):
         x0, y0 = VIEW_X, VIEW_Y
@@ -220,7 +245,7 @@ class Launcher:
         # Caption under the preview, like a plate in a catalogue.
         y = y0 + VIEW_H + 30
         self.text((x0, y), "MASTER", "body")
-        caption = f"{self.settings['style']}  ·  {self.settings['device'] or 'No input'}"
+        caption = f"{' + '.join(self.settings['styles'])}  ·  {self.settings['device'] or 'No input'}"
         self.text((x0, y + 20), shorten(caption, self.fonts["body"], 300), "body")
         self.text((x0, y + 40), "Playing" if playing else "Preview", "body", GREY)
         if playing:

@@ -2,16 +2,16 @@
 Master visualizer: listens to the DJ master (through an audio input) and
 plays an iTunes-classic style feedback visualizer in its own window.
 
-The launcher opens first: pick the input, style, beat source and window or
-full screen, check the preview and meters, then press Play. The launcher
+The launcher opens first: pick the input, styles (tick more than one to stack
+them), beat source and window or full screen, check the preview and meters, then press Play. The launcher
 stays open as a control panel; drag the visualizer window to the projector.
 
 Run:   python viz.py
-       python viz.py --device "USB Audio CODEC" --style Bloom --link --play
+       python viz.py --device "USB Audio CODEC" --style Tunnel Bloom --link --play
 
 Keys (either window):
        space / enter   play / stop
-       1 2 3           style: Tunnel / Swirl / Bloom
+       1 2 3           tick / untick Tunnel / Swirl / Bloom
        f               visualizer full screen on/off (Esc leaves it)
        h               info line on the visualizer on/off
        q               quit
@@ -38,15 +38,16 @@ SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 
 
 def load_settings():
-    settings = {"device": None, "style": STYLES[0], "link": False, "fullscreen": False}
+    settings = {"device": None, "styles": [STYLES[0]], "link": False, "fullscreen": False}
     try:
         with open(SETTINGS_FILE) as f:
             saved = json.load(f)
+        if "style" in saved and "styles" not in saved:   # saved before styles could stack
+            saved["styles"] = [saved["style"]]
         settings.update({k: saved[k] for k in settings if k in saved})
     except (OSError, ValueError):
         pass
-    if settings["style"] not in STYLES:
-        settings["style"] = STYLES[0]
+    settings["styles"] = [s for s in STYLES if s in settings["styles"]] or [STYLES[0]]
     return settings
 
 
@@ -82,7 +83,7 @@ def window_open(name):
 
 
 def draw_info(img, settings, beat, audio, fps):
-    text = f"{settings['style']}  {beat.status()}  {audio.db:.0f} dB  {fps:.0f} fps"
+    text = f"{' + '.join(settings['styles'])}  {beat.status()}  {audio.db:.0f} dB  {fps:.0f} fps"
     cv2.putText(img, text, (14, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(img, text, (14, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
@@ -91,7 +92,7 @@ class App:
     def __init__(self, args):
         self.settings = load_settings()
         if args.style:
-            self.settings["style"] = args.style
+            self.settings["styles"] = [s for s in STYLES if s in args.style]
         if args.link:
             self.settings["link"] = True
         if args.full:
@@ -101,7 +102,7 @@ class App:
         self.link = LinkClock()
         self.beat = BeatClock(self.link)
         self.beat.set_use_link(self.settings["link"])
-        self.viz = Visualizer(args.width, args.width * 9 // 16, self.settings["style"])
+        self.viz = Visualizer(args.width, args.width * 9 // 16, self.settings["styles"])
         self.launcher = Launcher(self.settings)
 
         self.devices = input_devices()
@@ -175,8 +176,14 @@ class App:
         elif action == "refresh":
             self.refresh_devices()
         elif action == "style":
-            s["style"] = value
-            self.viz.set_style(value)
+            # Tick or untick; the last ticked style can't be unticked.
+            if value in s["styles"]:
+                if len(s["styles"]) == 1:
+                    return
+                s["styles"] = [x for x in s["styles"] if x != value]
+            else:
+                s["styles"] = [x for x in STYLES if x in s["styles"] or x == value]
+            self.viz.set_styles(s["styles"])
         elif action == "link":
             if value and not self.link.available:
                 return
@@ -209,8 +216,10 @@ class App:
         cv2.resizeWindow(LAUNCHER, page.W, page.H)
         cv2.setMouseCallback(LAUNCHER, self.launcher.on_mouse)
         fps, last = 0.0, time.perf_counter()
+        count = 0
 
         while True:
+            count += 1
             now = time.perf_counter()
             dt, last = min(now - last, 0.1), now
             fps = 0.9 * fps + 0.1 * (1 / max(dt, 1e-6))
@@ -219,8 +228,11 @@ class App:
             self.beat.update(self.audio, dt)
             frame = self.viz.step(self.audio, self.beat, dt)
 
-            cv2.imshow(LAUNCHER, self.launcher.render(frame, self.audio, self.beat, self.playing,
-                                                      self.link.error))
+            # The launcher's text is slow to draw, so while the visualizer plays
+            # it only refreshes every third frame.
+            if not self.playing or count % 3 == 0 or self.launcher.actions:
+                cv2.imshow(LAUNCHER, self.launcher.render(frame, self.audio, self.beat, self.playing,
+                                                          self.link.error))
             if self.playing:
                 out = frame.copy() if self.show_info else frame
                 if self.show_info:
@@ -250,7 +262,8 @@ class App:
 def main():
     parser = argparse.ArgumentParser(description="iTunes-classic style visualizer for the DJ master out.")
     parser.add_argument("--device", help="audio input name (or part of it) or number")
-    parser.add_argument("--style", choices=STYLES, help="start with this style")
+    parser.add_argument("--style", nargs="+", choices=STYLES, metavar="STYLE",
+                        help="start with these styles ticked: Tunnel, Swirl, Bloom")
     parser.add_argument("--link", action="store_true", help="follow Ableton Link for the beat")
     parser.add_argument("--full", action="store_true", help="open the visualizer full screen")
     parser.add_argument("--play", action="store_true", help="start playing straight away")
