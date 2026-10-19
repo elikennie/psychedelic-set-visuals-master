@@ -1,4 +1,4 @@
-# master-viz
+# psychedelic-set-visuals-master
 
 DJ master out → an iTunes-classic style visualizer (tunnels, swirls, spectrum
 blooms) in its own window, ready to go full screen on a projector.
