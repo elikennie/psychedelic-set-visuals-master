@@ -14,10 +14,12 @@ import numpy as np
 import sounddevice as sd
 
 RING = 16384       # samples kept from the input (about a third of a second)
-FFT_SIZE = 2048    # samples per spectrum
+# Samples per spectrum. Levels follow the sound averaged over this window, so a
+# shorter one reacts sooner: 1024 is about 21 ms at 48 kHz, half the old 2048.
+FFT_SIZE = 1024
 WAVE_SIZE = 1024   # samples in the drawn waveform
+BLOCK = 256        # samples per delivery from the input (about 5 ms)
 BANDS = ((20, 150), (150, 2000), (2000, 10000))  # bass, mid, high (Hz)
-SPECTRUM_BARS = 48
 SILENCE_RMS = 0.0005   # about -66 dBFS; quieter than this counts as no signal
 
 
@@ -53,6 +55,7 @@ class AudioInput:
         self.stream = None
         self.device = None
         self.error = ""
+        self.latency = 0.0   # seconds the input itself holds sound before we see it
         self.rate = 48000
         self.lock = threading.Lock()
         self.ring = np.zeros(RING, np.float32)
@@ -63,8 +66,6 @@ class AudioInput:
     def reset_levels(self):
         self.level = np.zeros(3, np.float32)        # bass, mid, high: 0..1, smoothed
         self.band_peak = np.full(3, 1e-3, np.float32)
-        self.spectrum = np.zeros(SPECTRUM_BARS, np.float32)
-        self.spec_peak = 1e-3
         self.wave = np.zeros(WAVE_SIZE, np.float32)  # -1..1, auto-gained
         self.amp_peak = 0.05
         self.bass_avg = 0.0
@@ -82,9 +83,12 @@ class AudioInput:
             info = sd.query_devices(device)
             self.rate = int(info["default_samplerate"])
             channels = min(2, info["max_input_channels"])
+            # "low" asks the audio system for its smallest safe buffer.
             self.stream = sd.InputStream(device=device, channels=channels, samplerate=self.rate,
-                                         blocksize=512, dtype="float32", callback=self._callback)
+                                         blocksize=BLOCK, latency="low", dtype="float32",
+                                         callback=self._callback)
             self.stream.start()
+            self.latency = float(self.stream.latency)
             self.error = ""
         except Exception as e:
             self.stream = None
@@ -113,7 +117,7 @@ class AudioInput:
             return self.ring[idx]
 
     def analyse(self, dt):
-        """Update levels, spectrum, waveform and kick from the newest samples."""
+        """Update levels, waveform and kick from the newest samples."""
         x = self.latest(FFT_SIZE)
         rms = float(np.sqrt(np.mean(x * x)))
         self.db = 20 * math.log10(max(rms, 1e-6))
@@ -132,14 +136,6 @@ class AudioInput:
         rise = 1 - 0.5 ** (dt / 0.02)
         fall = 1 - 0.5 ** (dt / 0.18)
         self.level += (target - self.level) * np.where(target > self.level, rise, fall)
-
-        # Spectrum bars on a log scale, 40 Hz to 14 kHz.
-        edges = np.geomspace(40, 14000, SPECTRUM_BARS + 1) / hz
-        bars = np.array([spec[int(a):max(int(b), int(a) + 1)].mean() for a, b in zip(edges, edges[1:])])
-        bars *= np.linspace(1, 6, SPECTRUM_BARS)  # highs carry less energy; lift them
-        self.spec_peak = max(float(bars.max()), self.spec_peak * 0.5 ** (dt / 6), 1e-3)
-        target = np.zeros(SPECTRUM_BARS) if silent else np.sqrt(np.clip(bars / self.spec_peak, 0, 1))
-        self.spectrum += (target - self.spectrum) * np.where(target > self.spectrum, 0.7, fall)
 
         wave = x[-WAVE_SIZE:]
         self.amp_peak = max(float(np.abs(wave).max()), self.amp_peak * 0.5 ** (dt / 3), 0.02)
